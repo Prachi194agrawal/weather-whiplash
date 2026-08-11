@@ -1,0 +1,32 @@
+version: "3.9"
+
+# Overlay for production: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+# Assumes DATABASE_URL points at a managed Postgres instance and secrets are
+# supplied via the deployment platform's env/secret store, not this file.
+
+services:
+  frontend:
+    restart: always
+    ports: ["80:80"]
+
+  backend:
+    restart: always
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - INFERENCE_URL=http://inference:8500
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+
+  inference:
+    restart: always
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1G
+
+  db:
+    profiles: ["local-db-only"]
