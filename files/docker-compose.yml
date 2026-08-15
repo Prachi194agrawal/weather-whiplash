@@ -1,0 +1,35 @@
+services:
+  inference:
+    build: ./inference
+    environment:
+      # stub = instant, no downloads | clip = zero-shot (uncomment torch/transformers in
+      # inference/requirements.txt first) | onnx = your trained model in inference/model/
+      - MODEL_BACKEND=${MODEL_BACKEND:-stub}
+    ports:
+      - "8500:8500"
+    restart: unless-stopped
+
+  backend:
+    build: ./backend
+    environment:
+      - INFERENCE_URL=http://inference:8500
+      - DB_PATH=/data/track.db
+      - READOUT_WINDOW_S=900
+    volumes:
+      - track_data:/data
+    ports:
+      - "8000:8000"
+    depends_on:
+      - inference
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  track_data:

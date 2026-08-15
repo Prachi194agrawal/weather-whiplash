@@ -13,10 +13,6 @@ dist/
 .env
 .env.local
 
-# Model artifacts (large binaries — track separately, e.g. LFS or release assets)
-inference/model/*.onnx
-inference/model/*.pt
-
 # OS/editor
 .DS_Store
 .vscode/

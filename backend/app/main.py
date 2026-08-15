@@ -1,79 +1,114 @@
-from datetime import datetime, timedelta, timezone
+"""
+Backend API. This is the only service the frontend talks to.
+
+Flow for each frame:
+  frontend --(image)--> POST /predict --> inference service /infer --> store in SQLite
+                                                                 --> return label + live trend
+
+Endpoints:
+  POST /predict        accept an image, classify it, persist, return current readout
+  GET  /trend           time series + smoothed current state + Drying/Wetting direction
+  GET  /suggestion      plain-language tyre suggestion
+  GET  /health          liveness + whether inference is reachable
+"""
+import base64
+import os
 
 import httpx
-from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, UploadFile, File, Query
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy.orm import Session
 
-from app.db import Base, engine, get_db
-from app.inference_client import classify
-from app.models import Frame
-from app.schemas import PredictionOut, SuggestionOut
-from app.trend import build_suggestion
+from app.db import init_db, insert_prediction, get_window
+from app.smoothing import smooth_current, trend_direction, make_suggestion, display_condition
 
-app = FastAPI(title="Track Condition AI — Backend")
+INFERENCE_URL = os.getenv("INFERENCE_URL", "http://localhost:8500")
+READOUT_WINDOW_S = float(os.getenv("READOUT_WINDOW_S", "900"))
 
+app = FastAPI(title="Track Condition API", version="1.0")
+
+# open CORS so a Vite dev server (or any local frontend) can call it directly
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
 )
 
 
 @app.on_event("startup")
-def on_startup():
-    Base.metadata.create_all(bind=engine)
+def _startup():
+    init_db()
+
+
+def _call_inference(image_bytes: bytes) -> dict:
+    b64 = base64.b64encode(image_bytes).decode()
+    with httpx.Client(timeout=30) as client:
+        r = client.post(f"{INFERENCE_URL}/infer", json={"image_b64": b64})
+        r.raise_for_status()
+        return r.json()
+
+
+def _readout(session: str) -> dict:
+    """Assemble the live readout the UI wants, from what's stored for this session."""
+    pts = get_window(session, window_s=READOUT_WINDOW_S)
+    return {
+        "condition": display_condition(pts),   # headline: Dry/Damp/Wet/Drying/Unknown
+        "current": smooth_current(pts),
+        "trend": trend_direction(pts),
+        "suggestion": make_suggestion(pts),
+        "count": len(pts),
+    }
 
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
-
-
-@app.post("/predict", response_model=PredictionOut)
-async def predict(file: UploadFile = File(...), db: Session = Depends(get_db)):
-    image_bytes = await file.read()
-    if not image_bytes:
-        raise HTTPException(status_code=400, detail="Empty file upload.")
-
+    inf_ok = False
+    inf_backend = None
     try:
-        result = await classify(image_bytes, file.filename, file.content_type)
-    except httpx.HTTPError as exc:
-        raise HTTPException(
-            status_code=502, detail=f"Inference service unreachable: {exc}"
-        ) from exc
-
-    frame = Frame(
-        label=result["label"],
-        confidence=result["confidence"],
-        image_name=file.filename,
-    )
-    db.add(frame)
-    db.commit()
-    db.refresh(frame)
-    return frame
+        with httpx.Client(timeout=5) as client:
+            r = client.get(f"{INFERENCE_URL}/health")
+            inf_ok = r.status_code == 200
+            if inf_ok:
+                inf_backend = r.json().get("backend")
+    except Exception:
+        inf_ok = False
+    return {"status": "ok", "inference_reachable": inf_ok, "model_backend": inf_backend}
 
 
-@app.get("/trend", response_model=list[PredictionOut])
-def trend(window_minutes: int = 15, db: Session = Depends(get_db)):
-    cutoff = datetime.now(timezone.utc) - timedelta(minutes=window_minutes)
-    frames = (
-        db.query(Frame)
-        .filter(Frame.timestamp >= cutoff)
-        .order_by(Frame.timestamp.asc())
-        .all()
-    )
-    return frames
+@app.post("/predict")
+async def predict(file: UploadFile = File(...), session: str = Query("default")):
+    image_bytes = await file.read()
+    try:
+        result = _call_inference(image_bytes)
+    except Exception as e:
+        # Fail safe: never show a confident wrong label if inference is down.
+        return {"error": f"inference unavailable: {e}",
+                "condition": "Unknown",
+                "suggestion": {"level": "warning",
+                               "message": "Condition unknown — check the track visually."}}
+
+    insert_prediction(session, result["label"], result["confidence"],
+                       result["scores"], result.get("backend", "?"))
+
+    return {
+        "frame": {"label": result["label"], "confidence": result["confidence"],
+                  "scores": result["scores"], "backend": result.get("backend")},
+        **_readout(session),
+    }
 
 
-@app.get("/suggestion", response_model=SuggestionOut)
-def suggestion(window_minutes: int = 15, db: Session = Depends(get_db)):
-    cutoff = datetime.now(timezone.utc) - timedelta(minutes=window_minutes)
-    frames = (
-        db.query(Frame)
-        .filter(Frame.timestamp >= cutoff)
-        .order_by(Frame.timestamp.asc())
-        .all()
-    )
-    return build_suggestion(frames)
+@app.get("/trend")
+def trend(session: str = Query("default"), window_s: float = Query(900)):
+    pts = get_window(session, window_s=window_s)
+    series = [
+        {"ts": p["ts"],
+         "wetness": sum({"Dry": 0, "Damp": 1, "Wet": 2}[c] * v
+                        for c, v in p["scores"].items()),
+         "label": p["label"], "confidence": p["confidence"]}
+        for p in pts
+    ]
+    return {"series": series, **_readout(session)}
+
+
+@app.get("/suggestion")
+def suggestion(session: str = Query("default")):
+    pts = get_window(session, window_s=READOUT_WINDOW_S)
+    return make_suggestion(pts)

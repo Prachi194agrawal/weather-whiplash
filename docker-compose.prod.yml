@@ -1,8 +1,8 @@
-version: "3.9"
-
 # Overlay for production: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
-# Assumes DATABASE_URL points at a managed Postgres instance and secrets are
-# supplied via the deployment platform's env/secret store, not this file.
+# The SQLite file lives on the track_data volume — make sure that volume is on
+# durable, backed-up storage in production (a single named volume is fine for
+# one host; move to a shared/managed DB if the backend ever needs to scale
+# beyond one replica).
 
 services:
   frontend:
@@ -12,8 +12,9 @@ services:
   backend:
     restart: always
     environment:
-      - DATABASE_URL=${DATABASE_URL}
       - INFERENCE_URL=http://inference:8500
+      - DB_PATH=/data/track.db
+      - READOUT_WINDOW_S=900
     deploy:
       resources:
         limits:
@@ -27,6 +28,3 @@ services:
         limits:
           cpus: "2.0"
           memory: 1G
-
-  db:
-    profiles: ["local-db-only"]
