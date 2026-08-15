@@ -6,6 +6,9 @@ Full planning, architecture, and deployment doc: [docs/PLANNING.md](docs/PLANNIN
 
 > **Status:** running end to end with a **real trained ONNX model**, not a placeholder. The model predicts per-frame moisture (Dry/Damp/Wet) only — a single frame can't show "drying," since that's a change over time, not a texture. The backend's trend logic (`backend/app/smoothing.py`) derives the headline **Drying**/**Wetting** direction from a confidence-weighted moving window across recent frames. See [docs/PLANNING.md §3](docs/PLANNING.md).
 
+<img width="1812" height="883" alt="image" src="https://github.com/user-attachments/assets/58dcc28a-a5b9-4df0-8bf8-4a40f1d93303" />
+
+
 ## Quick start (Docker)
 
 ```bash
